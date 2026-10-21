@@ -9,7 +9,7 @@ import { audioCtx } from './player.js?v=0.2.0-web';
 const FPS = 30, SR = 48000;
 let Mux;
 async function libs() {
-  if (!Mux) Mux = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.1/+esm');
+  if (!Mux) Mux = await import('../vendor/mp4-muxer.js');
   await mp4box();
 }
 

@@ -4,7 +4,7 @@ import { getMedia } from './db.js?v=0.2.0-web';
 
 let MP4Box;
 export async function mp4box() {
-  if (!MP4Box) { const m = await import('https://cdn.jsdelivr.net/npm/mp4box@0.5.2/+esm'); MP4Box = m.default?.createFile ? m.default : m; }
+  if (!MP4Box) { const m = await import('../vendor/mp4box.js'); MP4Box = m.default?.createFile ? m.default : m; }
   return MP4Box;
 }
 
