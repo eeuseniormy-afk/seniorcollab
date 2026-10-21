@@ -149,7 +149,14 @@ class _StudioScreenState extends State<StudioScreen> {
                   (l) => l.label,
                   (l) => setState(() => p.layout = l),
                 ),
-                const SizedBox(height: 16),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text('Vídeos bem separados'),
+                  value: p.separar,
+                  onChanged: (v) => setState(() => p.separar = v),
+                ),
+                const SizedBox(height: 8),
                 Row(
                   children: [
                     Text('Faixas (${p.tracks.length})',
