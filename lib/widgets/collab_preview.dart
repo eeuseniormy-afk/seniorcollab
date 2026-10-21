@@ -23,7 +23,7 @@ class CollabPreview extends StatelessWidget {
     final f = project.format;
     final visible = project.tracks.where((t) => t.showVideo).toList();
     final n = visible.length + (extra != null ? 1 : 0);
-    final cells = computeCells(n, f, project.layout);
+    final cells = computeCells(n, f, project.layout, gap: project.separar);
 
     return AspectRatio(
       aspectRatio: f.aspect,
@@ -47,9 +47,9 @@ class CollabPreview extends StatelessWidget {
             top: c.y * sy,
             width: c.w * sx,
             height: c.h * sy,
-            child: Padding(
-              padding: const EdgeInsets.all(1),
-              child: ClipRRect(borderRadius: BorderRadius.circular(6), child: content),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(project.separar && n > 1 ? 4 : 0),
+              child: content,
             ),
           ));
         }
