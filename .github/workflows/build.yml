@@ -60,6 +60,10 @@ jobs:
           flutter create --org com.seniormy --project-name seniorcollab --platforms android,ios .
           python3 scripts/patch_platforms.py
       - run: flutter pub get
+      - name: Pods
+        run: |
+          flutter precache --ios
+          cd ios && pod install --repo-update
       - name: Build iOS (sem assinatura)
         run: flutter build ios --release --no-codesign
       - name: Empacotar IPA
