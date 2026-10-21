@@ -46,4 +46,9 @@ pbx = root / "ios/Runner.xcodeproj/project.pbxproj"
 x = pbx.read_text()
 x = re.sub(r"IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;", "IPHONEOS_DEPLOYMENT_TARGET = 15.0;", x)
 pbx.write_text(x)
+pod = root / "ios/Podfile"
+if pod.exists():
+    t = pod.read_text()
+    t = re.sub(r"^#?\s*platform :ios, '[0-9.]+'", "platform :ios, '15.0'", t, flags=re.M)
+    pod.write_text(t)
 print("patched")
