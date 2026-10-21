@@ -8,6 +8,7 @@ import { mediaMeta, decodeAudio } from './js/media.js';
 import { audioCtx } from './js/player.js';
 const log = (m) => { document.getElementById('log').textContent += '\n' + m; };
 try {
+  for (const codec of ['mp4a.40.2','opus']) { let r='sem AudioEncoder'; if ('AudioEncoder' in window) { try { r = JSON.stringify((await AudioEncoder.isConfigSupported({codec, sampleRate:48000, numberOfChannels:2, bitrate:192000})).supported); } catch(e) { r = 'erro '+e.message; } } log('AudioEncoder '+codec+': '+r); }
   const B = 'https://cdn.jsdelivr.net/gh/eeuseniormy-afk/seniorcollab@main/web/app/'; const files = [B + 'test/frag-portrait.mp4', B + 'test/plain-landscape.mov'];
   const tracks = [];
   for (const f of files) {
