@@ -8,7 +8,7 @@ class Cell {
 int _even(num v) => (v ~/ 2) * 2;
 
 /// Calcula a posição de cada pessoa na tela, para a prévia e para a exportação.
-List<Cell> computeCells(int n, OutputFormat f, LayoutMode mode) {
+List<Cell> computeCells(int n, OutputFormat f, LayoutMode mode, {bool gap = true}) {
   if (n <= 0) return const [];
   final w = f.width, h = f.height;
   final portrait = h >= w;
@@ -44,16 +44,21 @@ List<Cell> computeCells(int n, OutputFormat f, LayoutMode mode) {
       }
   }
 
-  final cw = _even(w / cols);
-  final ch = _even(h / rows);
+  // Espaço entre os vídeos (e nas bordas) quando há mais de um.
+  final m = (gap && n > 1) ? _even((w < h ? w : h) * 0.016) : 0;
+  final cw = _even((w - (cols + 1) * m) / cols);
+  final ch = _even((h - (rows + 1) * m) / rows);
+  final usedH = rows * ch + (rows + 1) * m;
+  final top = _even((h - usedH) / 2);
   final cells = <Cell>[];
   for (var i = 0; i < n; i++) {
     final r = i ~/ cols;
     final c = i % cols;
     // Centraliza a última linha quando ela está incompleta.
     final inRow = (r == rows - 1) ? n - r * cols : cols;
-    final rowOffset = _even((w - inRow * cw) / 2);
-    cells.add(Cell(rowOffset + c * cw, r * ch, cw, ch));
+    final rowW = inRow * cw + (inRow - 1) * m;
+    final rowOffset = _even((w - rowW) / 2);
+    cells.add(Cell(rowOffset + c * (cw + m), top + m + r * (ch + m), cw, ch));
   }
   return cells;
 }
