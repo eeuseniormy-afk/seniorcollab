@@ -14,8 +14,6 @@ perms = [
     "android.permission.WAKE_LOCK",
 ]
 block = "".join(f'    <uses-permission android:name="{p}"/>\n' for p in perms if p not in s)
-block += '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n'
-block += '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n'
 s = s.replace("<application", block + "    <application", 1)
 s = re.sub(r'android:label="[^"]*"', 'android:label="SeniorCollab"', s, count=1)
 if "requestLegacyExternalStorage" not in s:
