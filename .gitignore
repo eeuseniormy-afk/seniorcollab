@@ -4,5 +4,4 @@ build/
 .flutter-plugins-dependencies
 pubspec.lock
 android/
-ios/*
-!ios/Podfile
+ios/
