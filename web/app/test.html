@@ -8,7 +8,7 @@ import { mediaMeta, decodeAudio } from './js/media.js';
 import { audioCtx } from './js/player.js';
 const log = (m) => { document.getElementById('log').textContent += '\n' + m; };
 try {
-  const files = ['test/frag-portrait.mp4', 'test/plain-landscape.mov'];
+  const B = 'https://cdn.jsdelivr.net/gh/eeuseniormy-afk/seniorcollab@main/web/app/'; const files = [B + 'test/frag-portrait.mp4', B + 'test/plain-landscape.mov'];
   const tracks = [];
   for (const f of files) {
     const blob = await (await fetch(f)).blob();
