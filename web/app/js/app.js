@@ -3,7 +3,9 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, APP_VERSION } from './config.js';
 import { FORMATS, LAYOUTS, computeCells } from './layout.js';
 import { EQ } from './audio.js';
 import * as db from './db.js';
-import { Player, unlockAudio, outputLatencyMs } from './player.js';
+import { Player, unlockAudio } from './player.js';
+import { decodeAudio, forgetMedia, mediaMeta } from './media.js';
+import { MicCapture, findLag, calibrate, savedLatency, setLatency, defaultLatency } from './sync.js';
 import { renderProject, projectDurationMs, probe, QUALITIES, supportsExport } from './render.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, detectSessionInUrl: true, flowType: 'implicit' } });
@@ -153,8 +155,17 @@ function newProject(name) {
   };
 }
 async function addMediaTrack(p, blob, name) {
-  const info = await probe(blob);
   const mediaId = await db.putMedia(blob);
+  let info = null;
+  try {
+    const meta = await mediaMeta(mediaId, blob);
+    const v = meta.video, au = meta.audio;
+    const end = (tr) => tr && tr.samples.length ? Math.max(...tr.samples.map(s => (s.cts - tr.t0 + s.duration) * 1000 / s.ts)) : 0;
+    const d = Math.round(Math.max(end(v), 0));
+    if (d > 0) info = { durationMs: d, hasAudio: !!(au && au.samples.length) };
+  } catch (_) { /* cai no probe */ }
+  if (!info) info = await probe(blob);
+  if (!info.durationMs) { await db.deleteMedia(mediaId); throw new Error('Não consegui ler a duração desse vídeo.'); }
   const t = {
     id: db.uid(), name, mediaId, mime: blob.type, durationMs: info.durationMs, hasAudio: info.hasAudio,
     offsetMs: 0, volume: 1, muted: false, showVideo: true, eq: 'flat', comp: false, noise: false, reverb: 0,
@@ -242,8 +253,9 @@ async function viewStudio(id, autoStart = false) {
   if (!p) return viewHome();
   player = new Player();
   app.replaceChildren(h('main', { class: 'studio' }, h('p', { class: 'muted center' }, 'Abrindo…')));
-  await player.sync(p);
-  if (p.latencyMs == null) { p.latencyMs = Math.max(20, outputLatencyMs() + 20); saveSoon(p); }
+  const opening = app.querySelector('.muted');
+  await player.sync(p, (txt) => { if (opening) opening.textContent = txt; });
+  saveSoon(p);
 
   const render = () => {
     const playBtn = h('button', {
@@ -267,7 +279,7 @@ async function viewStudio(id, autoStart = false) {
         class: 'icon-btn', 'aria-label': 'Apagar faixa', onclick: async () => {
           if (!(await confirmBox(`Apagar ${t.name}?`))) return;
           player.stop();
-          p.tracks.splice(i, 1); await db.deleteMedia(t.mediaId); await db.saveProject(p);
+          p.tracks.splice(i, 1); forgetMedia(t.mediaId); await db.deleteMedia(t.mediaId); await db.saveProject(p);
           await player.sync(p); render();
         },
       }, icon('trash'))));
@@ -315,63 +327,75 @@ function pickRecorderMime() {
 }
 
 async function viewRecord(p, back) {
-  await unlockAudio();
-  let facing = 'user', stream = null, rec = null, chunks = [], recording = false, tick = null, autoStop = null;
-  let recStartAt = 0, playStartAt = 0;
+  const ctx = await unlockAudio();
+  let facing = 'user', stream = null, rec = null, chunks = [], recording = false, busy = false, tick = null, autoStop = null;
+  let cap = null, T0 = 0, recStartCtx = 0, capStartCtx = 0;
   const cam = h('video', { class: 'camvid mirror', playsinline: true, muted: true, autoplay: true });
   cam.muted = true;
   const timer = h('div', { class: 'rtimer' }, 'Novo take');
   const count = h('div', { class: 'count' });
   const hint = h('p', { class: 'rhint' }, p.tracks.length ? 'Coloque o fone e toque para gravar' : 'Toque para gravar o primeiro take');
+  const latInfo = h('button', { class: 'chip small-chip', onclick: () => openCalibration() });
   const total = projectDurationMs(p);
+  const showLat = () => { latInfo.textContent = `Latência ${currentLatency()} ms · calibrar`; };
 
   const overlay = h('div', { class: 'record' });
   const stageHolder = h('div', { class: 'rstage' });
   const recBtn = h('button', { class: 'recbtn', 'aria-label': 'Gravar', onclick: () => recording ? stop() : startCountdown() }, h('i'));
 
+  function currentLatency() { return savedLatency() ?? defaultLatency(ctx); }
+
   async function openCam() {
     if (stream) stream.getTracks().forEach(t => t.stop());
+    if (cap) { cap.close(); cap = null; }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 }, sampleRate: { ideal: 48000 } },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 1 }, sampleRate: { ideal: 48000 } },
       });
     } catch (e) {
-      hint.textContent = 'Não consegui acessar a câmera e o microfone. Libere o acesso nas configurações do navegador.';
+      hint.textContent = 'Não consegui acessar a câmera e o microfone. Libere o acesso nas configurações do Safari (aA › Ajustes do site).';
       return;
     }
     cam.srcObject = stream;
     cam.classList.toggle('mirror', facing === 'user');
     cam.play().catch(() => {});
+    try { cap = await MicCapture.create(ctx, stream); } catch (e) { cap = null; console.warn('captura', e); }
+    await unlockAudio();
   }
 
   function draw() { stageHolder.replaceChildren(previewBox(p, h('div', { class: 'camwrap' }, cam, count))); }
 
   async function startCountdown() {
-    if (!stream || recording) return;
-    recBtn.disabled = true;
+    if (!stream || recording || busy) return;
+    busy = true; recBtn.disabled = true;
+    await unlockAudio();
     for (let i = 3; i > 0; i--) { count.textContent = i; await new Promise(r => setTimeout(r, 1000)); }
     count.textContent = '';
-    recBtn.disabled = false;
-    start();
+    try { await start(); } finally { busy = false; recBtn.disabled = false; }
   }
 
-  function start() {
+  async function start() {
     const mime = pickRecorderMime();
     chunks = [];
     try {
       rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: 12_000_000, audioBitsPerSecond: 256_000 });
     } catch (_) { rec = new MediaRecorder(stream); }
     rec.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
-    rec.onstart = async () => {
-      recStartAt = performance.now();
-      if (p.tracks.length) { playStartAt = performance.now(); await player.play(p); }
-      recording = true; overlay.classList.add('on');
-      hint.textContent = 'Gravando… toque para parar';
-      tick = setInterval(() => { timer.textContent = `● ${fmtTime(performance.now() - recStartAt)}${total ? ' / ' + fmtTime(total) : ''}`; }, 250);
-      if (total) autoStop = setTimeout(stop, total + 700);
-    };
+    // captura do mic começa antes do gravador, para cobrir o início do arquivo
+    if (cap) { cap.start(Math.min(60, total / 1000 + 20)); }
+    capStartCtx = ctx.currentTime;
+    const started = new Promise(r => { rec.onstart = r; });
     rec.start(1000);
+    await started;
+    recStartCtx = ctx.currentTime;
+    // os outros takes entram num instante exato do relógio de áudio
+    T0 = ctx.currentTime + 0.35;
+    if (p.tracks.length) await player.play(p, 0, T0);
+    recording = true; overlay.classList.add('on');
+    hint.textContent = 'Gravando… toque para parar';
+    tick = setInterval(() => { timer.textContent = `● ${fmtTime((ctx.currentTime - T0) * 1000)}${total ? ' / ' + fmtTime(total) : ''}`; }, 250);
+    if (total) autoStop = setTimeout(stop, (T0 - ctx.currentTime) * 1000 + total + 600);
   }
 
   async function stop() {
@@ -379,27 +403,72 @@ async function viewRecord(p, back) {
     recording = false; clearInterval(tick); clearTimeout(autoStop);
     player.stop();
     overlay.classList.remove('on');
-    hint.textContent = 'Salvando…'; recBtn.disabled = true;
+    hint.textContent = 'Salvando e sincronizando…'; recBtn.disabled = true;
     const done = new Promise(r => { rec.onstop = r; });
     rec.stop(); await done;
+    if (cap) await cap.stop();
     const blob = new Blob(chunks, { type: rec.mimeType || 'video/mp4' });
-    if (!/mp4|quicktime/.test(blob.type)) toast('Aviso: este navegador gravou em WebM; a exportação pode não funcionar. Prefira o Safari no iPhone ou o Chrome atualizado.', 5000);
     try {
       const n = p.tracks.length + 1;
       const t = await addMediaTrack(p, blob, `Take ${n}`);
-      t.offsetMs = n === 1 ? 0 : -Math.round(playStartAt - recStartAt + (p.latencyMs || 0));
+      if (n > 1) {
+        const lat = currentLatency() / 1000;
+        let fileStartCtx = null, how = 'estimativa';
+        const capData = cap?.take();
+        if (capData) {
+          const audio = await decodeAudio(t.mediaId, ctx).catch(() => null);
+          if (audio) {
+            const r = findLag(audio.getChannelData(0), Math.round(0.4 * audio.sampleRate), capData.data, capData.sr, 6);
+            if (r && r.confidence > 8) { fileStartCtx = capData.startTime + r.lag; how = `áudio (${r.confidence.toFixed(0)})`; }
+          }
+        }
+        if (fileStartCtx === null) fileStartCtx = recStartCtx - 0.05; // reserva: hora do início do gravador
+        // posição do início do arquivo na linha do tempo do projeto
+        t.offsetMs = Math.round((fileStartCtx - T0 - lat) * 1000);
+        t.syncMethod = how;
+      }
       await db.saveProject(p);
       cleanup();
       await player.sync(p);
       back();
+      if (n > 1) toast(t.syncMethod?.startsWith('áudio') ? 'Take sincronizado pelo som.' : 'Take salvo. Se precisar, ajuste a sincronia no mixer.');
     } catch (e) {
       hint.textContent = 'Erro ao salvar: ' + e.message; recBtn.disabled = false;
     }
   }
 
+  async function openCalibration() {
+    if (recording || busy) return;
+    if (!cap) { toast('Microfone indisponível para calibrar.'); return; }
+    busy = true;
+    const beat = h('div', { class: 'beat' });
+    const msg = h('p', {}, 'Com fone: bata palmas junto com cada clique. Sem fone: só deixe o celular ouvir os cliques. Faça isso com o mesmo fone que vai usar na gravação.');
+    const res = h('p', { class: 'muted' });
+    const go = h('button', { class: 'btn primary' }, 'Começar');
+    const manual = h('input', { type: 'range', min: 0, max: 500, step: 5, value: currentLatency() });
+    const manOut = h('span', { class: 'val' }, `${currentLatency()} ms`);
+    manual.oninput = () => { manOut.textContent = `${manual.value} ms`; setLatency(Number(manual.value)); showLat(); };
+    const close = () => { m.remove(); busy = false; showLat(); };
+    go.onclick = async () => {
+      go.disabled = true; res.textContent = 'Ouvindo…';
+      try {
+        const ms = await calibrate(ctx, cap, (i) => { beat.classList.remove('hit'); void beat.offsetWidth; beat.classList.add('hit'); beat.textContent = i < 2 ? 'prepare' : '👏'; });
+        setLatency(ms); manual.value = ms; manOut.textContent = `${ms} ms`;
+        res.textContent = `Pronto: ${ms} ms. Isso fica salvo neste aparelho.`;
+      } catch (e) { res.textContent = e.message; }
+      go.disabled = false; go.textContent = 'Calibrar de novo'; beat.textContent = '';
+    };
+    const m = h('div', { class: 'modal' }, h('div', { class: 'sheet' },
+      h('h3', {}, 'Calibrar fone e microfone'), msg, beat, res,
+      h('div', { class: 'slider' }, h('div', { class: 'srow' }, h('span', {}, 'Ajuste manual'), manOut), manual),
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: close }, 'Fechar'), go)));
+    document.body.append(m);
+  }
+
   function cleanup() {
     clearInterval(tick); clearTimeout(autoStop);
     if (rec && rec.state !== 'inactive') { try { rec.stop(); } catch (_) {} }
+    if (cap) { cap.close(); cap = null; }
     if (stream) stream.getTracks().forEach(t => t.stop());
     overlay.remove();
     recorderCleanup = null;
@@ -412,12 +481,13 @@ async function viewRecord(p, back) {
 
   overlay.append(
     h('div', { class: 'rtop' },
-      h('button', { class: 'icon-btn', 'aria-label': 'Fechar', onclick: () => { if (!recording) { cleanup(); back(); } } }, icon('close')),
+      h('button', { class: 'icon-btn', 'aria-label': 'Fechar', onclick: () => { if (!recording) { player.stop(); cleanup(); back(); } } }, icon('close')),
       timer,
-      h('button', { class: 'icon-btn', 'aria-label': 'Trocar câmera', onclick: async () => { if (recording) return; facing = facing === 'user' ? 'environment' : 'user'; await openCam(); } }, icon('flip'))),
+      h('button', { class: 'icon-btn', 'aria-label': 'Trocar câmera', onclick: async () => { if (recording || busy) return; facing = facing === 'user' ? 'environment' : 'user'; await openCam(); } }, icon('flip'))),
     stageHolder,
-    h('div', { class: 'rbottom' }, recBtn, hint));
+    h('div', { class: 'rbottom' }, recBtn, hint, p.tracks.length ? latInfo : null));
   document.body.append(overlay);
+  showLat();
   draw();
   await openCam();
 }
@@ -511,8 +581,23 @@ function viewExport(p) {
           h('a', { class: 'btn ghost', href: resultUrl, download: fname }, 'Baixar MP4')),
         h('p', { class: 'muted small' }, 'No iPhone, toque em Salvar / Compartilhar e escolha "Salvar vídeo" para ir para a galeria.'));
     } catch (e) {
-      status.textContent = e.name === 'AbortError' ? 'Cancelado.' : 'Falhou: ' + (e.message || e);
       bar.style.width = '0';
+      if (e.name === 'AbortError') status.textContent = 'Cancelado.';
+      else {
+        console.error(e);
+        status.textContent = 'Falhou: ' + (e.message || e);
+        const details = [
+          `SeniorCollab ${APP_VERSION}`, navigator.userAgent,
+          `Erro: ${e.name || ''} ${e.message || e}`,
+          `Formato ${p.format} · ${p.quality} · layout ${p.layout} · ${p.tracks.length} faixas`,
+          ...p.tracks.map((t, i) => `#${i + 1} ${t.mime || '?'} ${t.durationMs}ms offset ${t.offsetMs} áudio ${t.hasAudio} vídeo ${t.showVideo}`),
+          `WebCodecs: VE ${'VideoEncoder' in window} VD ${'VideoDecoder' in window} AE ${'AudioEncoder' in window} AD ${'AudioDecoder' in window}`,
+          (e.stack || '').split('\n').slice(0, 4).join(' | '),
+        ].join('\n');
+        result.replaceChildren(
+          h('pre', { class: 'errbox' }, details),
+          h('button', { class: 'btn ghost', onclick: async () => { try { await navigator.clipboard.writeText(details); toast('Copiado. Cole aqui na conversa com o Hark.'); } catch (_) { toast('Selecione o texto e copie.'); } } }, 'Copiar detalhes do erro'));
+      }
     } finally {
       go.disabled = false; go.textContent = 'Renderizar de novo'; cancel.style.display = 'none';
       if (wake) wake.release().catch(() => {});
