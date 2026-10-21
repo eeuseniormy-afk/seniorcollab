@@ -1,9 +1,10 @@
 // Exportação no próprio aparelho: decodifica cada faixa (WebCodecs), monta no layout,
 // mixa o áudio com os efeitos e codifica H.264 + AAC em MP4.
-import { FORMATS, computeCells } from './layout.js';
-import { buildChain, buildMaster, normalize } from './audio.js';
-import { mediaMeta, readSamples, decodeAudio, mp4box } from './media.js';
-import { audioCtx } from './player.js';
+import { FORMATS, computeCells } from './layout.js?v=0.2.0-web';
+import { buildChain, buildMaster, normalize } from './audio.js?v=0.2.0-web';
+import { mediaMeta, readSamples, decodeAudio, mp4box, forgetMedia } from './media.js?v=0.2.0-web';
+import { findLag } from './sync.js?v=0.2.0-web';
+import { audioCtx } from './player.js?v=0.2.0-web';
 
 const FPS = 30, SR = 48000;
 let Mux;
@@ -28,16 +29,6 @@ async function videoConfig(w, h, bitrate, sw = false) {
     for (const codec of codecs) {
       const cfg = { codec, width: w, height: h, bitrate, framerate: FPS, hardwareAcceleration, latencyMode: 'quality', bitrateMode: 'variable', avc: { format: 'avc' } };
       try { const s = await VideoEncoder.isConfigSupported(cfg); if (s.supported) return cfg; } catch (_) {}
-    }
-  }
-  return null;
-}
-async function audioConfig() {
-  if (!('AudioEncoder' in window)) return null;
-  for (const [codec, mux] of [['mp4a.40.2', 'aac'], ['opus', 'opus']]) {
-    for (const bitrate of [256000, 192000, 128000]) {
-      const cfg = { codec, sampleRate: SR, numberOfChannels: 2, bitrate };
-      try { const s = await AudioEncoder.isConfigSupported(cfg); if (s.supported) return { cfg, mux }; } catch (_) {}
     }
   }
   return null;
@@ -138,6 +129,120 @@ export function projectDurationMs(p) {
   return Math.max(0, b.offsetMs + b.durationMs);
 }
 
+// AudioSpecificConfig AAC-LC (para quando o navegador não informa)
+function ascAAC(sr, ch) {
+  const idx = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000].indexOf(sr);
+  return new Uint8Array([(2 << 3) | (idx >> 1), ((idx & 1) << 7) | (ch << 3)]);
+}
+
+/** 1ª opção: AudioEncoder (AAC). */
+async function encodeWithAudioEncoder(mix, codec, mux) {
+  if (!('AudioEncoder' in window)) return null;
+  const cfg = { codec, sampleRate: SR, numberOfChannels: 2, bitrate: 256000 };
+  let ok = false;
+  for (const br of [256000, 192000, 128000]) {
+    cfg.bitrate = br;
+    try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) { ok = true; break; } } catch (_) {}
+  }
+  if (!ok) return null;
+  const chunks = []; let err = null, dcfg = null;
+  const enc = new AudioEncoder({
+    output: (ch, m) => {
+      const data = new Uint8Array(ch.byteLength); ch.copyTo(data);
+      chunks.push({ data, type: ch.type, timestamp: ch.timestamp, duration: ch.duration ?? Math.round(1024 / SR * 1e6) });
+      if (m?.decoderConfig && !dcfg) dcfg = m.decoderConfig;
+    },
+    error: (e) => { err = e; },
+  });
+  enc.configure(cfg);
+  const L = mix.getChannelData(0), R = mix.getChannelData(1), N = 1024;
+  for (let i = 0; i < mix.length; i += N) {
+    if (err) break;
+    const n = Math.min(N, mix.length - i);
+    const data = new Float32Array(n * 2);
+    data.set(L.subarray(i, i + n), 0); data.set(R.subarray(i, i + n), n);
+    const ad = new AudioData({ format: 'f32-planar', sampleRate: SR, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(i / SR * 1e6), data });
+    enc.encode(ad); ad.close();
+    if (enc.encodeQueueSize > 32) await new Promise(r => setTimeout(r, 0));
+  }
+  try { await enc.flush(); } catch (e) { err = err || e; }
+  try { enc.close(); } catch (_) {}
+  const total = chunks.reduce((a, c) => a + c.data.length, 0);
+  if (err || chunks.length < 4 || total < chunks.length * 8) return null;   // saída vazia/defeituosa
+  // configuração confiável: sempre declara 48 kHz estéreo (evita o bug de "0 canais" do iOS)
+  const decoderConfig = mux === 'aac'
+    ? { codec: 'mp4a.40.2', sampleRate: SR, numberOfChannels: 2, description: (dcfg?.description && dcfg.description.byteLength >= 2) ? dcfg.description : ascAAC(SR, 2) }
+    : { codec, sampleRate: SR, numberOfChannels: 2, description: dcfg?.description };
+  return { chunks, mux, decoderConfig, sampleRate: SR, channels: 2, how: mux === 'aac' ? 'AAC' : 'Opus' };
+}
+
+/** 2ª opção: grava o mix com o MediaRecorder do aparelho (AAC em tempo real) e alinha pelo som. */
+async function encodeWithMediaRecorder(mix, onStatus, signal) {
+  if (!window.MediaRecorder) return null;
+  const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => MediaRecorder.isTypeSupported(m));
+  if (!mime) return null;
+  const ctx = audioCtx();
+  try { await ctx.resume(); } catch (_) {}
+  const dest = ctx.createMediaStreamDestination();
+  dest.channelCount = 2;
+  const src = ctx.createBufferSource(); src.buffer = mix; src.connect(dest);
+  const rec = new MediaRecorder(dest.stream, { mimeType: mime, audioBitsPerSecond: 256000 });
+  const parts = [];
+  rec.ondataavailable = (e) => { if (e.data?.size) parts.push(e.data); };
+  const started = new Promise(r => { rec.onstart = r; });
+  rec.start(1000); await started;
+  const lead = 0.3;
+  src.start(ctx.currentTime + lead);
+  const dur = mix.duration + lead + 0.6;
+  const t0 = performance.now();
+  await new Promise((res, rej) => {
+    const iv = setInterval(() => {
+      const el = (performance.now() - t0) / 1000;
+      onStatus?.(`Gravando o áudio final ${Math.min(100, Math.round(el / dur * 100))}%`);
+      if (signal?.aborted) { clearInterval(iv); try { rec.stop(); src.stop(); } catch (_) {} rej(new DOMException('Cancelado', 'AbortError')); }
+      if (el >= dur) { clearInterval(iv); res(); }
+    }, 250);
+  });
+  const stopped = new Promise(r => { rec.onstop = r; });
+  rec.stop(); await stopped;
+  try { src.disconnect(); } catch (_) {}
+  const blob = new Blob(parts, { type: rec.mimeType || 'audio/mp4' });
+  const key = 'mixrec-' + Math.random();
+  let meta;
+  try { meta = await mediaMeta(key, blob); } catch (_) { return null; } finally { forgetMedia(key); }
+  const a = meta.audio;
+  if (!a || !a.samples.length) return null;
+  const isAAC = a.codec.startsWith('mp4a');
+  // onde o mix começa dentro da gravação
+  let shiftUs = Math.round(lead * 1e6);
+  try {
+    const recBuf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const r = findLag(mix.getChannelData(0), Math.round(0.5 * mix.sampleRate), recBuf.getChannelData(0), recBuf.sampleRate, 3);
+    if (r && r.confidence > 8) shiftUs = Math.round(r.lag * 1e6);
+  } catch (_) {}
+  const datas = await readSamples(blob, a.samples);
+  const chunks = [];
+  a.samples.forEach((s, i) => {
+    const ts = Math.round((s.cts - a.t0) * 1e6 / s.ts) - shiftUs;
+    const d = Math.round(s.duration * 1e6 / s.ts);
+    if (ts + d <= 0) return;
+    chunks.push({ data: datas[i], type: 'key', timestamp: Math.max(0, ts), duration: d });
+  });
+  if (chunks.length < 4) return null;
+  return {
+    chunks, mux: isAAC ? 'aac' : 'opus', sampleRate: a.sampleRate, channels: a.channels,
+    decoderConfig: { codec: isAAC ? 'mp4a.40.2' : a.codec, sampleRate: a.sampleRate, numberOfChannels: a.channels, description: a.description || (isAAC ? ascAAC(a.sampleRate, a.channels) : undefined) },
+    how: isAAC ? 'AAC (gravado)' : a.codec,
+  };
+}
+
+async function encodeAudio(mix, onStatus, signal) {
+  onStatus('Codificando o áudio…');
+  return (await encodeWithAudioEncoder(mix, 'mp4a.40.2', 'aac').catch(() => null))
+    || (await encodeWithMediaRecorder(mix, onStatus, signal).catch((e) => { if (e?.name === 'AbortError') throw e; return null; }))
+    || (await encodeWithAudioEncoder(mix, 'opus', 'opus').catch(() => null));
+}
+
 /** Mixa todas as faixas com efeitos, offline, e normaliza. */
 async function mixAudio(p, durS, onStatus) {
   const len = Math.max(1, Math.ceil(durS * SR));
@@ -175,13 +280,13 @@ export async function renderProject(p, opts = {}) {
   const bitrate = Math.round(W * H * FPS * q.bpp);
   const vcfg = await videoConfig(W, H, bitrate, !!opts._sw);
   if (!vcfg) throw new Error('Este aparelho não codifica vídeo nessa resolução. Tente uma qualidade menor.');
-  const acfg = await audioConfig();
   const durMs = projectDurationMs(p);
   if (durMs <= 0) throw new Error('Projeto vazio.');
   const durS = durMs / 1000;
 
-  // áudio primeiro (rápido) para falhar cedo
-  const mix = acfg ? await mixAudio(p, durS, onStatus) : null;
+  // áudio primeiro: mixa e codifica (com reservas) antes do vídeo
+  const mix = opts._audio !== undefined ? null : await mixAudio(p, durS, onStatus);
+  const audio = opts._audio !== undefined ? opts._audio : (mix ? await encodeAudio(mix, onStatus, signal) : null);
 
   onStatus('Lendo os vídeos…');
   const visible = p.tracks.filter(t => t.showVideo);
@@ -200,9 +305,9 @@ export async function renderProject(p, opts = {}) {
   const muxer = new Mux.Muxer({
     target: new Mux.ArrayBufferTarget(),
     video: { codec: 'avc', width: W, height: H, frameRate: FPS },
-    audio: mix ? { codec: acfg.mux, numberOfChannels: 2, sampleRate: SR } : undefined,
+    audio: audio ? { codec: audio.mux, numberOfChannels: audio.channels, sampleRate: audio.sampleRate } : undefined,
     fastStart: 'in-memory',
-    firstTimestampBehavior: 'offset',
+    firstTimestampBehavior: 'cross-track-offset',
   });
 
   const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(W, H) : Object.assign(document.createElement('canvas'), { width: W, height: H });
@@ -235,7 +340,7 @@ export async function renderProject(p, opts = {}) {
       onStatus('Tentando de novo em modo compatível…');
       try { enc.close(); } catch (_) {}
       sources.forEach(s => s.close());
-      return renderProject(p, { ...opts, _sw: true });
+      return renderProject(p, { ...opts, _sw: true, _audio: audio });
     }
     throw e;
   } finally {
@@ -243,25 +348,16 @@ export async function renderProject(p, opts = {}) {
     sources.forEach(s => s.close());
   }
 
-  if (mix) {
-    onStatus('Codificando o áudio…');
-    const aenc = new AudioEncoder({ output: (ch, m) => muxer.addAudioChunk(ch, m), error: (e) => { encErr = e; } });
-    aenc.configure(acfg.cfg);
-    const L = mix.getChannelData(0), R = mix.getChannelData(1), N = 1024;
-    for (let i = 0; i < mix.length; i += N) {
-      const n = Math.min(N, mix.length - i);
-      const data = new Float32Array(n * 2);
-      data.set(L.subarray(i, i + n), 0); data.set(R.subarray(i, i + n), n);
-      const ad = new AudioData({ format: 'f32-planar', sampleRate: SR, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(i / SR * 1e6), data });
-      aenc.encode(ad); ad.close();
-      if (aenc.encodeQueueSize > 32) await new Promise(r => setTimeout(r, 0));
+  if (audio) {
+    let first = true;
+    for (const c of audio.chunks) {
+      muxer.addAudioChunkRaw(c.data, c.type, c.timestamp, c.duration, first ? { decoderConfig: audio.decoderConfig } : undefined);
+      first = false;
     }
-    await aenc.flush(); aenc.close();
-    if (encErr) throw encErr;
   }
   onProgress(1);
   muxer.finalize();
-  return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), width: W, height: H, codec: vcfg.codec, audio: !!mix };
+  return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), width: W, height: H, codec: vcfg.codec, audio: audio ? audio.how : false };
 }
 
 /** Duração e se tem áudio, lendo o arquivo. */

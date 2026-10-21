@@ -1,6 +1,6 @@
 // Leitura dos arquivos de vídeo: tabela de amostras (sem carregar tudo na memória),
 // leitura sob demanda e decodificação do áudio com reserva via WebCodecs.
-import { getMedia } from './db.js';
+import { getMedia } from './db.js?v=0.2.0-web';
 
 let MP4Box;
 export async function mp4box() {

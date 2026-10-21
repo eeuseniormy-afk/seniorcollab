@@ -1,8 +1,8 @@
 // Prévia: o som de cada faixa toca por Web Audio, agendado no mesmo instante exato
 // (é o que garante a sincronia); os vídeos tocam mudos e são corrigidos se escorregarem.
-import { buildChain, buildMaster } from './audio.js';
-import { getMedia } from './db.js';
-import { decodeAudio } from './media.js';
+import { buildChain, buildMaster } from './audio.js?v=0.2.0-web';
+import { getMedia } from './db.js?v=0.2.0-web';
+import { decodeAudio } from './media.js?v=0.2.0-web';
 
 let ctx;
 export function audioCtx() {

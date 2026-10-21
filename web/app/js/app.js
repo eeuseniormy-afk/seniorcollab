@@ -1,12 +1,12 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, APP_VERSION } from './config.js';
-import { FORMATS, LAYOUTS, computeCells } from './layout.js';
-import { EQ } from './audio.js';
-import * as db from './db.js';
-import { Player, unlockAudio } from './player.js';
-import { decodeAudio, forgetMedia, mediaMeta } from './media.js';
-import { MicCapture, findLag, calibrate, savedLatency, setLatency, defaultLatency } from './sync.js';
-import { renderProject, projectDurationMs, probe, QUALITIES, supportsExport } from './render.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, APP_VERSION } from './config.js?v=0.2.0-web';
+import { FORMATS, LAYOUTS, computeCells } from './layout.js?v=0.2.0-web';
+import { EQ } from './audio.js?v=0.2.0-web';
+import * as db from './db.js?v=0.2.0-web';
+import { Player, unlockAudio } from './player.js?v=0.2.0-web';
+import { decodeAudio, forgetMedia, mediaMeta } from './media.js?v=0.2.0-web';
+import { MicCapture, findLag, calibrate, savedLatency, setLatency, defaultLatency } from './sync.js?v=0.2.0-web';
+import { renderProject, projectDurationMs, probe, QUALITIES, supportsExport } from './render.js?v=0.2.0-web';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, detectSessionInUrl: true, flowType: 'implicit' } });
 const MAX_TRACKS = 6;

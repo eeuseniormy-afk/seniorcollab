@@ -2,10 +2,10 @@
 <body style="font:14px monospace;background:#111;color:#eee;padding:16px">
 <h3>Teste automático de renderização</h3><pre id="log">rodando…</pre><video id="v" controls playsinline style="max-width:300px"></video>
 <script type="module">
-import * as db from './js/db.js';
-import { renderProject } from './js/render.js';
-import { mediaMeta, decodeAudio } from './js/media.js';
-import { audioCtx } from './js/player.js';
+import * as db from './js/db.js?v=0.2.0-web';
+import { renderProject } from './js/render.js?v=0.2.0-web';
+import { mediaMeta, decodeAudio } from './js/media.js?v=0.2.0-web';
+import { audioCtx } from './js/player.js?v=0.2.0-web';
 const log = (m) => { document.getElementById('log').textContent += '\n' + m; };
 try {
   for (const codec of ['mp4a.40.2','opus']) { let r='sem AudioEncoder'; if ('AudioEncoder' in window) { try { r = JSON.stringify((await AudioEncoder.isConfigSupported({codec, sampleRate:48000, numberOfChannels:2, bitrate:192000})).supported); } catch(e) { r = 'erro '+e.message; } } log('AudioEncoder '+codec+': '+r); }
