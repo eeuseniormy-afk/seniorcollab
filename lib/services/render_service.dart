@@ -30,14 +30,14 @@ List<String> buildArgs(CollabProject p, String out, {required bool hardware}) {
   }
 
   final graph = <String>[];
-  graph.add('color=c=0x101418:s=${f.width}x${f.height}:r=30:d=${_s(dur)}[bg]');
+  graph.add('color=c=0x0B0D10:s=${f.width}x${f.height}:r=30:d=${_s(dur)}[bg]');
 
   // Vídeo
   final visible = <int>[];
   for (var i = 0; i < p.tracks.length; i++) {
     if (p.tracks[i].showVideo) visible.add(i);
   }
-  final cells = computeCells(visible.length, f, p.layout);
+  final cells = computeCells(visible.length, f, p.layout, gap: p.separar);
   var last = 'bg';
   for (var k = 0; k < visible.length; k++) {
     final i = visible[k];
