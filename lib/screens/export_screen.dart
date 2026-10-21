@@ -123,7 +123,15 @@ class _ExportScreenState extends State<ExportScreen> {
                 ),
             ],
           ),
-          const SizedBox(height: 20),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Vídeos bem separados'),
+            subtitle: const Text('Borda escura entre cada pessoa',
+                style: TextStyle(color: SC.muted, fontSize: 12)),
+            value: p.separar,
+            onChanged: _running ? null : (v) => setState(() => p.separar = v),
+          ),
+          const SizedBox(height: 12),
           if (_running) ...[
             LinearProgressIndicator(value: _progress == 0 ? null : _progress),
             const SizedBox(height: 8),
