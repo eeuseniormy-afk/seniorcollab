@@ -99,6 +99,9 @@ class CollabProject extends ChangeNotifier {
   OutputFormat format = OutputFormat.vertical916;
   LayoutMode layout = LayoutMode.automatico;
 
+  /// Vídeos bem separados, com uma borda escura entre eles.
+  bool separar = true;
+
   /// Compensação de latência aplicada a cada take novo (ms).
   int latencyMs = 0;
 
